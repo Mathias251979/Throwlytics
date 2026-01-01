@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useRef } from "react";
 import Papa from "papaparse";
 
 /* -----------------------------
@@ -692,6 +692,7 @@ function Histogram({
 export default function Page() {
   const [rows, setRows] = useState<Row[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Synthetic global stats created on load
   const globalStats = useMemo(() => generateSyntheticGlobalStats(6000, 1337), []);
@@ -794,6 +795,7 @@ export default function Page() {
           <input
             type="file"
             accept=".csv,text/csv"
+            ref={fileInputRef}
             onChange={(e) => {
               const f = e.target.files?.[0];
               if (f) parseCsv(f);
@@ -804,6 +806,7 @@ export default function Page() {
             onClick={() => {
               setRows([]);
               setError(null);
+              if (fileInputRef.current) fileInputRef.current.value = "";
             }}
           >
             Clear
@@ -813,7 +816,7 @@ export default function Page() {
 
         {/* Global overview (shown even before upload) */}
         <section style={styles.card}>
-          <h2 style={styles.cardTitle}>Global Benchmarks (Simulated)</h2>
+          <h2 style={styles.cardTitle}>Global Benchmarks</h2>
           <p style={styles.diagDetail}>
             These are synthetic “site-wide” distributions so we can build and test the UI without collecting any real user data.
           </p>
