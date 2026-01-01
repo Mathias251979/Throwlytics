@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useMemo, useState, useRef } from "react";
+import React, { useMemo, useState, useRef, useEffect } from "react";
 import Papa from "papaparse";
+import { supabase } from "@/lib/supabaseClient";
 
 /* -----------------------------
    TYPES
@@ -70,6 +71,13 @@ type GlobalStats = {
   spinSorted: number[];
   noseSorted: number[];
   wobbleSorted: number[];
+};
+
+type DbThrowRow = {
+  speed_mph: number | null;
+  spin_rpm: number | null;
+  nose_deg: number | null;
+  wobble_deg: number | null;
 };
 
 /* -----------------------------
@@ -147,7 +155,8 @@ const toNum = (v: any): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
-const mean = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : undefined);
+const mean = (arr: number[]) =>
+  arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : undefined;
 
 const sd = (arr: number[]) => {
   if (arr.length < 2) return undefined;
@@ -184,11 +193,40 @@ function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
 }
 
+function buildGlobalStatsFromDb(rows: DbThrowRow[]): GlobalStats {
+  const speed = rows
+    .map((r) => r.speed_mph)
+    .filter((v): v is number => typeof v === "number");
+  const spin = rows
+    .map((r) => r.spin_rpm)
+    .filter((v): v is number => typeof v === "number");
+  const nose = rows
+    .map((r) => r.nose_deg)
+    .filter((v): v is number => typeof v === "number");
+  const wobble = rows
+    .map((r) => r.wobble_deg)
+    .filter((v): v is number => typeof v === "number");
+
+  return {
+    speed,
+    spin,
+    nose,
+    wobble,
+    speedSorted: [...speed].sort((a, b) => a - b),
+    spinSorted: [...spin].sort((a, b) => a - b),
+    noseSorted: [...nose].sort((a, b) => a - b),
+    wobbleSorted: [...wobble].sort((a, b) => a - b),
+  };
+}
+
 /* -----------------------------
    SKILL BANDS
    ----------------------------- */
 
-function bandForMetric(metric: Metric, value: number | undefined): { band: Band; note: string; score01: number } {
+function bandForMetric(
+  metric: Metric,
+  value: number | undefined
+): { band: Band; note: string; score01: number } {
   if (value === undefined) return { band: "Beginner", note: "No data", score01: 0 };
 
   if (metric === "wobble") {
@@ -302,55 +340,8 @@ function buildIssues(stats: {
 }
 
 /* -----------------------------
-   SYNTHETIC GLOBAL STATS (LOCAL FAKE DATA)
+   PERCENTILES / GLOBAL UTILS
    ----------------------------- */
-
-function mulberry32(seed: number) {
-  return function () {
-    let t = (seed += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function randNormal(rng: () => number) {
-  let u = 0,
-    v = 0;
-  while (u === 0) u = rng();
-  while (v === 0) v = rng();
-  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
-}
-
-function generateSyntheticGlobalStats(nSessions = 6000, seed = 1337): GlobalStats {
-  const rng = mulberry32(seed);
-
-  const speed: number[] = [];
-  const spin: number[] = [];
-  const nose: number[] = [];
-  const wobble: number[] = [];
-
-  for (let i = 0; i < nSessions; i++) {
-    const skill = randNormal(rng);
-
-    const spd = clamp(47 + 4.2 * skill + 3.8 * randNormal(rng), 25, 68);
-    const wob = clamp(4.3 - 0.9 * skill + 0.9 * Math.abs(randNormal(rng)), 0.8, 11.0);
-    const nos = clamp(3.0 - 0.4 * skill + 0.55 * (wob - 3.5) + 1.8 * randNormal(rng), -6, 14);
-    const spn = clamp(860 + 10.5 * (spd - 45) + 70 * skill - 20 * (wob - 3.5) + 85 * randNormal(rng), 350, 1250);
-
-    speed.push(spd);
-    wobble.push(wob);
-    nose.push(nos);
-    spin.push(spn);
-  }
-
-  const speedSorted = [...speed].sort((a, b) => a - b);
-  const spinSorted = [...spin].sort((a, b) => a - b);
-  const noseSorted = [...nose].sort((a, b) => a - b);
-  const wobbleSorted = [...wobble].sort((a, b) => a - b);
-
-  return { speed, spin, nose, wobble, speedSorted, spinSorted, noseSorted, wobbleSorted };
-}
 
 function percentileOf(value: number, sortedAsc: number[], higherIsBetter: boolean) {
   if (!sortedAsc.length) return undefined;
@@ -364,41 +355,6 @@ function percentileOf(value: number, sortedAsc: number[], higherIsBetter: boolea
   const frac = lo / sortedAsc.length;
   const p = higherIsBetter ? frac : 1 - frac;
   return Math.round(p * 100);
-}
-
-/* -----------------------------
-   HISTOGRAM GRAPH (SVG)
-   ----------------------------- */
-
-function computeHistogram(values: number[], bins: number, min: number, max: number) {
-  const counts = new Array(bins).fill(0);
-  const span = max - min;
-  if (span <= 0) return { counts, min, max };
-
-  for (const v of values) {
-    const t = (v - min) / span;
-    const idx = Math.min(bins - 1, Math.max(0, Math.floor(t * bins)));
-    counts[idx]++;
-  }
-  return { counts, min, max };
-}
-
-function valueToX(value: number, min: number, max: number, width: number) {
-  if (max <= min) return 0;
-  return ((value - min) / (max - min)) * width;
-}
-
-function niceRange(metric: Metric, values: number[]) {
-  // Uses data range but pads a bit for nicer visuals.
-  const vmin = Math.min(...values);
-  const vmax = Math.max(...values);
-  const pad = (vmax - vmin) * 0.08 || 1;
-
-  // For each metric, keep a sensible clamp so outliers don't ruin chart
-  if (metric === "spin") return { min: Math.max(300, vmin - pad), max: Math.min(1300, vmax + pad) };
-  if (metric === "power") return { min: Math.max(20, vmin - pad), max: Math.min(75, vmax + pad) };
-  if (metric === "nose") return { min: Math.max(-10, vmin - pad), max: Math.min(18, vmax + pad) };
-  return { min: Math.max(0, vmin - pad), max: Math.min(12, vmax + pad) };
 }
 
 function metricToGlobalArray(metric: Metric, g: GlobalStats) {
@@ -426,6 +382,39 @@ function nosePercentileFromAvg(avgNose: number, g: GlobalStats) {
   const distArr = g.nose.map((n) => Math.abs(n - target)).sort((a, b) => a - b);
   const userDist = Math.abs(avgNose - target);
   return percentileOf(userDist, distArr, false);
+}
+
+/* -----------------------------
+   HISTOGRAM GRAPH (SVG)
+   ----------------------------- */
+
+function computeHistogram(values: number[], bins: number, min: number, max: number) {
+  const counts = new Array(bins).fill(0);
+  const span = max - min;
+  if (span <= 0) return { counts, min, max };
+
+  for (const v of values) {
+    const t = (v - min) / span;
+    const idx = Math.min(bins - 1, Math.max(0, Math.floor(t * bins)));
+    counts[idx]++;
+  }
+  return { counts, min, max };
+}
+
+function valueToX(value: number, min: number, max: number, width: number) {
+  if (max <= min) return 0;
+  return ((value - min) / (max - min)) * width;
+}
+
+function niceRange(metric: Metric, values: number[]) {
+  const vmin = Math.min(...values);
+  const vmax = Math.max(...values);
+  const pad = (vmax - vmin) * 0.08 || 1;
+
+  if (metric === "spin") return { min: Math.max(300, vmin - pad), max: Math.min(1300, vmax + pad) };
+  if (metric === "power") return { min: Math.max(20, vmin - pad), max: Math.min(75, vmax + pad) };
+  if (metric === "nose") return { min: Math.max(-10, vmin - pad), max: Math.min(18, vmax + pad) };
+  return { min: Math.max(0, vmin - pad), max: Math.min(12, vmax + pad) };
 }
 
 /* -----------------------------
@@ -609,7 +598,6 @@ function Histogram({
   const xGlobal = valueToX(globalAvg, min, max, plotW);
   const xUser = userValue !== undefined ? valueToX(userValue, min, max, plotW) : undefined;
 
-  // optional "goal band" (subtle)
   let goalBand: { from: number; to: number } | null = null;
   if (metric === "nose") goalBand = { from: 1, to: 3 };
   if (metric === "wobble") goalBand = { from: 0, to: 3 };
@@ -626,11 +614,17 @@ function Histogram({
 
   return (
     <svg width="100%" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${metric} global distribution`}>
-      {/* background */}
-      <rect x="0" y="0" width={width} height={height} rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.10)" />
+      <rect
+        x="0"
+        y="0"
+        width={width}
+        height={height}
+        rx="14"
+        fill="rgba(255,255,255,0.03)"
+        stroke="rgba(255,255,255,0.10)"
+      />
 
       <g transform={`translate(${padding.left},${padding.top})`}>
-        {/* goal band */}
         {goalBand && (
           <rect
             x={Math.min(bandX1, bandX2)}
@@ -641,7 +635,6 @@ function Histogram({
           />
         )}
 
-        {/* bars */}
         {counts.map((c, i) => {
           const h = (c / maxCount) * plotH;
           return (
@@ -657,13 +650,11 @@ function Histogram({
           );
         })}
 
-        {/* global avg line */}
         <line x1={xGlobal} y1={0} x2={xGlobal} y2={plotH} stroke="rgba(188,215,255,0.95)" strokeWidth="2" />
         <text x={xGlobal + 4} y={12} fill="rgba(188,215,255,0.95)" fontSize="11" fontWeight="700">
           Global avg
         </text>
 
-        {/* user line */}
         {xUser !== undefined && (
           <>
             <line x1={xUser} y1={0} x2={xUser} y2={plotH} stroke="rgba(140,255,210,0.95)" strokeWidth="2" />
@@ -673,7 +664,6 @@ function Histogram({
           </>
         )}
 
-        {/* x-axis labels */}
         <text x={0} y={plotH + 18} {...tickStyle}>
           {labelMin.toFixed(metric === "spin" ? 0 : 1)}
         </text>
@@ -694,10 +684,45 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Synthetic global stats created on load
-  const globalStats = useMemo(() => generateSyntheticGlobalStats(6000, 1337), []);
+  // Real global stats from Supabase
+  const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
+  const [globalLoading, setGlobalLoading] = useState(true);
+  const [globalError, setGlobalError] = useState<string | null>(null);
+
+  async function fetchGlobal(limit = 6000) {
+    const { data, error } = await supabase
+      .from("throws")
+      .select("speed_mph, spin_rpm, nose_deg, wobble_deg")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error) throw new Error(error.message);
+    return buildGlobalStatsFromDb((data ?? []) as DbThrowRow[]);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setGlobalLoading(true);
+        setGlobalError(null);
+        const gs = await fetchGlobal(6000);
+        if (!cancelled) setGlobalStats(gs);
+      } catch (e: any) {
+        if (!cancelled) setGlobalError(e?.message ?? "Failed to load global data");
+      } finally {
+        if (!cancelled) setGlobalLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const globalAverages = useMemo(() => {
+    if (!globalStats) return { speed: 0, spin: 0, nose: 0, wobble: 0 };
     return {
       speed: mean(globalStats.speed) ?? 0,
       spin: mean(globalStats.spin) ?? 0,
@@ -723,7 +748,10 @@ export default function Page() {
     [rows]
   );
 
-  const cleanThrows = useMemo(() => throws.filter((t) => t.speed !== undefined || t.spin !== undefined), [throws]);
+  const cleanThrows = useMemo(
+    () => throws.filter((t) => t.speed !== undefined || t.spin !== undefined),
+    [throws]
+  );
 
   const stats = useMemo(() => {
     const speeds = cleanThrows.map((t) => t.speed).filter((v): v is number => typeof v === "number");
@@ -759,12 +787,53 @@ export default function Page() {
 
   const percentiles = useMemo(() => {
     const out: Partial<Record<Metric, number>> = {};
-    if (stats.avgSpeed !== undefined) out.power = percentileOf(stats.avgSpeed, globalStats.speedSorted, true);
-    if (stats.avgSpin !== undefined) out.spin = percentileOf(stats.avgSpin, globalStats.spinSorted, true);
-    if (stats.avgWobble !== undefined) out.wobble = percentileOf(stats.avgWobble, globalStats.wobbleSorted, false);
+    if (!globalStats) return out;
+
+    if (stats.avgSpeed !== undefined) out.power = percentileOf(stats.avgSpeed, metricToSortedArray("power", globalStats), true);
+    if (stats.avgSpin !== undefined) out.spin = percentileOf(stats.avgSpin, metricToSortedArray("spin", globalStats), true);
+    if (stats.avgWobble !== undefined) out.wobble = percentileOf(stats.avgWobble, metricToSortedArray("wobble", globalStats), false);
     if (stats.avgNose !== undefined) out.nose = nosePercentileFromAvg(stats.avgNose, globalStats);
     return out;
   }, [stats.avgSpeed, stats.avgSpin, stats.avgWobble, stats.avgNose, globalStats]);
+
+  const hasUserData = cleanThrows.length > 0;
+
+  async function logThrowsToSupabase(parsed: Row[]) {
+    // Map CSV -> DB columns
+    const payload = parsed
+      .map((r) => ({
+        speed_mph: toNum(r.speedMph) ?? null,
+        spin_rpm: toNum(r.spinRpm) ?? null,
+        nose_deg: toNum(r.noseAngle) ?? null,
+        wobble_deg: toNum(r.wobbleAngle) ?? null,
+      }))
+      .filter(
+        (t) =>
+          t.speed_mph !== null ||
+          t.spin_rpm !== null ||
+          t.nose_deg !== null ||
+          t.wobble_deg !== null
+      );
+
+    if (!payload.length) return;
+
+    const { error: insErr } = await supabase.from("throws").insert(payload);
+    if (insErr) {
+      setError(`Supabase insert failed: ${insErr.message}`);
+      return;
+    }
+
+    // Refresh globals so your upload shows up
+    try {
+      setGlobalLoading(true);
+      const gs = await fetchGlobal(6000);
+      setGlobalStats(gs);
+    } catch (e: any) {
+      setGlobalError(e?.message ?? "Failed to refresh global data");
+    } finally {
+      setGlobalLoading(false);
+    }
+  }
 
   const parseCsv = (file: File) => {
     setError(null);
@@ -776,19 +845,21 @@ export default function Page() {
           setError(res.errors[0].message || "CSV parse error");
           return;
         }
-        setRows(res.data ?? []);
+        const parsed = res.data ?? [];
+        setRows(parsed);
+
+        // Log real data to Supabase (fire and forget)
+        void logThrowsToSupabase(parsed);
       },
     });
   };
-
-  const hasUserData = cleanThrows.length > 0;
 
   return (
     <main style={styles.page}>
       <div style={styles.container}>
         <h1 style={styles.title}>Throwlytics – Disc Golf Throw Analytics</h1>
         <p style={styles.subtitle}>
-          Upload throws.csv. All analysis runs locally in your browser. Global distributions below are currently simulated (synthetic data) for UI/testing.
+          Upload throws.csv. Analysis runs locally in your browser. Global benchmarks below are pulled from your Supabase database.
         </p>
 
         <div style={styles.controlsCard}>
@@ -814,75 +885,111 @@ export default function Page() {
           {error && <span style={{ color: "#ffb4b4", fontSize: 13 }}>{error}</span>}
         </div>
 
-        {/* Global overview (shown even before upload) */}
+        {/* Global overview */}
         <section style={styles.card}>
           <h2 style={styles.cardTitle}>Global Benchmarks</h2>
-          <p style={styles.diagDetail}>
-            These are synthetic “site-wide” distributions so we can build and test the UI without collecting any real user data.
-          </p>
 
-          <div style={styles.pillRow}>
-            <span style={styles.pill}>Global avg speed: <b>{globalAverages.speed.toFixed(1)} mph</b></span>
-            <span style={styles.pill}>Global avg spin: <b>{globalAverages.spin.toFixed(0)} rpm</b></span>
-            <span style={styles.pill}>Global avg nose: <b>{globalAverages.nose.toFixed(1)}°</b></span>
-            <span style={styles.pill}>Global avg wobble: <b>{globalAverages.wobble.toFixed(1)}°</b></span>
-          </div>
+          {globalLoading ? (
+            <p style={styles.diagDetail}>Loading global data…</p>
+          ) : globalError ? (
+            <p style={{ ...styles.diagDetail, color: "#ffb4b4" }}>{globalError}</p>
+          ) : !globalStats || (globalStats.speed.length + globalStats.spin.length + globalStats.nose.length + globalStats.wobble.length) === 0 ? (
+            <p style={styles.diagDetail}>No global data yet. Upload a CSV to seed the database.</p>
+          ) : (
+            <>
+              <p style={styles.diagDetail}>
+                These distributions are built from real uploaded throws saved in Supabase.
+              </p>
 
-          <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
-            {(["power", "spin", "nose", "wobble"] as Metric[]).map((m) => {
-              const gArr = metricToGlobalArray(m, globalStats);
-              const gAvg = metricMean(m, globalStats) ?? 0;
+              <div style={styles.pillRow}>
+                <span style={styles.pill}>
+                  Global avg speed: <b>{globalAverages.speed.toFixed(1)} mph</b>
+                </span>
+                <span style={styles.pill}>
+                  Global avg spin: <b>{globalAverages.spin.toFixed(0)} rpm</b>
+                </span>
+                <span style={styles.pill}>
+                  Global avg nose: <b>{globalAverages.nose.toFixed(1)}°</b>
+                </span>
+                <span style={styles.pill}>
+                  Global avg wobble: <b>{globalAverages.wobble.toFixed(1)}°</b>
+                </span>
+              </div>
 
-              const userVal =
-                m === "power" ? stats.avgSpeed :
-                m === "spin" ? stats.avgSpin :
-                m === "nose" ? stats.avgNose :
-                stats.avgWobble;
+              <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+                {(["power", "spin", "nose", "wobble"] as Metric[]).map((m) => {
+                  const gArr = metricToGlobalArray(m, globalStats);
+                  if (!gArr.length) {
+                    return (
+                      <div key={m} style={styles.metricCard}>
+                        <p style={styles.metricName}>{formatMetric(m)}</p>
+                        <p style={styles.metricSub}>Not enough data yet for this metric.</p>
+                      </div>
+                    );
+                  }
 
-              const p = percentiles[m];
+                  const gAvg = metricMean(m, globalStats) ?? 0;
 
-              return (
-                <div key={m} style={styles.metricCard}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                    <div>
-                      <p style={styles.metricName}>{formatMetric(m)}</p>
-                      <p style={{ ...styles.metricSub, marginTop: 6 }}>
-                        Global avg: <b>{m === "spin" ? gAvg.toFixed(0) : gAvg.toFixed(1)} {metricUnit(m)}</b>
-                        {hasUserData && userVal !== undefined ? (
-                          <>
-                            {" "}• You:{" "}
-                            <b>{m === "spin" ? userVal.toFixed(0) : userVal.toFixed(1)} {metricUnit(m)}</b>
-                            {" "}• Percentile: <b>{p !== undefined ? `${p}th` : "—"}</b>
-                          </>
-                        ) : (
-                          <>
-                            {" "}• Upload a CSV to see your marker + percentile
-                          </>
-                        )}
-                      </p>
+                  const userVal =
+                    m === "power"
+                      ? stats.avgSpeed
+                      : m === "spin"
+                      ? stats.avgSpin
+                      : m === "nose"
+                      ? stats.avgNose
+                      : stats.avgWobble;
+
+                  const p = percentiles[m];
+
+                  return (
+                    <div key={m} style={styles.metricCard}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                        <div>
+                          <p style={styles.metricName}>{formatMetric(m)}</p>
+                          <p style={{ ...styles.metricSub, marginTop: 6 }}>
+                            Global avg:{" "}
+                            <b>
+                              {m === "spin" ? gAvg.toFixed(0) : gAvg.toFixed(1)} {metricUnit(m)}
+                            </b>
+                            {hasUserData && userVal !== undefined ? (
+                              <>
+                                {" "}
+                                • You:{" "}
+                                <b>
+                                  {m === "spin" ? userVal.toFixed(0) : userVal.toFixed(1)} {metricUnit(m)}
+                                </b>
+                                {" "}
+                                • Percentile: <b>{p !== undefined ? `${p}th` : "—"}</b>
+                              </>
+                            ) : (
+                              <> • Upload a CSV to see your marker + percentile</>
+                            )}
+                          </p>
+                        </div>
+                        <div style={{ ...styles.pill, opacity: 0.9 }}>
+                          Goal: <b>{goalForMetric(m)}</b>
+                        </div>
+                      </div>
+
+                      <div style={{ marginTop: 10 }}>
+                        <Histogram
+                          metric={m}
+                          globalValues={gArr}
+                          globalAvg={gAvg}
+                          userValue={hasUserData ? userVal : undefined}
+                        />
+                        <p style={{ ...styles.metricSub, marginTop: 8 }}>
+                          <span style={styles.muted}>
+                            Blue line = global avg • Green line = you • Shaded area ≈ goal range
+                          </span>
+                        </p>
+                      </div>
                     </div>
-                    <div style={{ ...styles.pill, opacity: 0.9 }}>
-                      Goal: <b>{goalForMetric(m)}</b>
-                    </div>
-                  </div>
-
-                  <div style={{ marginTop: 10 }}>
-                    <Histogram
-                      metric={m}
-                      globalValues={gArr}
-                      globalAvg={gAvg}
-                      userValue={hasUserData ? userVal : undefined}
-                    />
-                    <p style={{ ...styles.metricSub, marginTop: 8 }}>
-                      <span style={styles.muted}>
-                        Blue line = global avg • Green line = you • Shaded area ≈ goal range
-                      </span>
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </section>
 
         {hasUserData ? (
@@ -913,7 +1020,9 @@ export default function Page() {
                   const unit = metricUnit(metric);
 
                   let displayValue = "—";
-                  if (value !== undefined) displayValue = metric === "spin" ? `${value.toFixed(0)} ${unit}` : `${value.toFixed(1)} ${unit}`;
+                  if (value !== undefined)
+                    displayValue =
+                      metric === "spin" ? `${value.toFixed(0)} ${unit}` : `${value.toFixed(1)} ${unit}`;
 
                   return (
                     <div key={metric} style={styles.metricCard}>
@@ -927,7 +1036,7 @@ export default function Page() {
                       </div>
                       <p style={{ ...styles.metricSub, marginTop: 8 }}>
                         <span style={styles.muted}>
-                          Simulated global percentile:{" "}
+                          Global percentile:{" "}
                           <b style={{ color: "rgba(238,243,255,0.85)" }}>{p !== undefined ? `${p}th` : "—"}</b>{" "}
                           • Goal: {goalForMetric(metric)}
                         </span>
@@ -946,7 +1055,8 @@ export default function Page() {
                 <>
                   <div style={styles.diagHeadline}>No major issues detected</div>
                   <p style={styles.diagDetail}>
-                    Your averages don’t trigger red flags. Next gains usually come from tighter variability (same release every time) and small angle tuning.
+                    Your averages don’t trigger red flags. Next gains usually come from tighter variability (same release every time)
+                    and small angle tuning.
                   </p>
                 </>
               ) : (
@@ -970,8 +1080,8 @@ export default function Page() {
                                   {iss.value === undefined
                                     ? "—"
                                     : iss.metric === "spin"
-                                      ? `${iss.value.toFixed(0)} ${iss.unitText}`
-                                      : `${iss.value.toFixed(1)} ${iss.unitText}`}
+                                    ? `${iss.value.toFixed(0)} ${iss.unitText}`
+                                    : `${iss.value.toFixed(1)} ${iss.unitText}`}
                                 </b>
                               </span>
                               <span style={{ ...styles.pill, opacity: 0.85 }}>Goal: {iss.goalText}</span>
@@ -1007,7 +1117,7 @@ export default function Page() {
             {/* All Throws */}
             <section style={styles.card}>
               <h2 style={styles.cardTitle}>All Throws</h2>
-              <p style={styles.diagDetail}>Every row from your CSV (local only).</p>
+              <p style={styles.diagDetail}>Every row from your CSV (local).</p>
 
               <div style={styles.tableWrap}>
                 <div style={{ maxHeight: 340, overflow: "auto" }}>
@@ -1030,13 +1140,27 @@ export default function Page() {
                         <tr key={t.idx}>
                           <td style={styles.td}>{t.idx}</td>
                           <td style={styles.td}>{t.time ?? <span style={styles.muted}>—</span>}</td>
-                          <td style={styles.td}>{t.primaryThrowType ?? t.throwType ?? <span style={styles.muted}>—</span>}</td>
-                          <td style={styles.td}>{t.speed !== undefined ? `${t.speed.toFixed(1)} mph` : <span style={styles.muted}>—</span>}</td>
-                          <td style={styles.td}>{t.spin !== undefined ? `${t.spin.toFixed(0)} rpm` : <span style={styles.muted}>—</span>}</td>
-                          <td style={styles.td}>{t.nose !== undefined ? `${t.nose.toFixed(1)}°` : <span style={styles.muted}>—</span>}</td>
-                          <td style={styles.td}>{t.wobble !== undefined ? `${t.wobble.toFixed(1)}°` : <span style={styles.muted}>—</span>}</td>
-                          <td style={styles.td}>{t.launch !== undefined ? `${t.launch.toFixed(1)}°` : <span style={styles.muted}>—</span>}</td>
-                          <td style={styles.td}>{t.hyzer !== undefined ? `${t.hyzer.toFixed(1)}°` : <span style={styles.muted}>—</span>}</td>
+                          <td style={styles.td}>
+                            {t.primaryThrowType ?? t.throwType ?? <span style={styles.muted}>—</span>}
+                          </td>
+                          <td style={styles.td}>
+                            {t.speed !== undefined ? `${t.speed.toFixed(1)} mph` : <span style={styles.muted}>—</span>}
+                          </td>
+                          <td style={styles.td}>
+                            {t.spin !== undefined ? `${t.spin.toFixed(0)} rpm` : <span style={styles.muted}>—</span>}
+                          </td>
+                          <td style={styles.td}>
+                            {t.nose !== undefined ? `${t.nose.toFixed(1)}°` : <span style={styles.muted}>—</span>}
+                          </td>
+                          <td style={styles.td}>
+                            {t.wobble !== undefined ? `${t.wobble.toFixed(1)}°` : <span style={styles.muted}>—</span>}
+                          </td>
+                          <td style={styles.td}>
+                            {t.launch !== undefined ? `${t.launch.toFixed(1)}°` : <span style={styles.muted}>—</span>}
+                          </td>
+                          <td style={styles.td}>
+                            {t.hyzer !== undefined ? `${t.hyzer.toFixed(1)}°` : <span style={styles.muted}>—</span>}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -1048,7 +1172,7 @@ export default function Page() {
         ) : null}
 
         <footer style={styles.footer}>
-          Drill videos are linked from YouTube. Credit belongs to the original creators. Percentiles/graphs are currently simulated with synthetic data.
+          Drill videos are linked from YouTube. Credit belongs to the original creators.
         </footer>
       </div>
     </main>
