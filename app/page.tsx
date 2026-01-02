@@ -898,7 +898,7 @@ export default function Page() {
           ) : (
             <>
               <p style={styles.diagDetail}>
-                These distributions are built from real uploaded throws saved in Supabase.
+                Global statistics from all user submissions.
               </p>
 
               <div style={styles.pillRow}>
