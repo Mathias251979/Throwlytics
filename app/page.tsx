@@ -3,6 +3,7 @@
 import React, { useMemo, useState, useRef, useEffect } from "react";
 import Papa from "papaparse";
 import { supabase } from "@/lib/supabaseClient";
+import Image from "next/image";
 
 /* -----------------------------
    TYPES
@@ -857,7 +858,15 @@ export default function Page() {
   return (
     <main style={styles.page}>
       <div style={styles.container}>
-        <h1 style={styles.title}>Throwlytics – Disc Golf Throw Analytics</h1>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+  <Image
+    src="/logo/throwlytics-logo.png"
+    alt="Throwlytics"
+    width={180}
+    height={60}
+    priority
+  />
+</div>
         <p style={styles.subtitle}>
           Upload throws.csv. Analysis runs locally in your browser. Global benchmarks below are pulled from your Supabase database.
         </p>
